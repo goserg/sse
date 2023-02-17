@@ -10,33 +10,27 @@ import (
 
 type Server struct {
 	mu    sync.RWMutex
-	chans map[uuid.UUID]chan Message
+	chans map[uuid.UUID]chan message
 }
 
 func New() *Server {
 	return &Server{
-		chans: make(map[uuid.UUID]chan Message),
+		chans: make(map[uuid.UUID]chan message),
 	}
-}
-
-type Message struct {
-	Id    int    `json:"id,omitempty"`
-	Event string `json:"event,omitempty"`
-	Data  []byte `json:"data,omitempty"`
 }
 
 func (s *Server) HandlerFunc(w http.ResponseWriter, r *http.Request) {
 	chanId := uuid.New()
-	c := make(chan Message)
+	c := make(chan message)
 	s.mu.Lock()
 	s.chans[chanId] = c
 	s.mu.Unlock()
 	defer func() {
+		s.mu.Lock()
 		delete(s.chans, chanId)
 		close(c)
+		s.mu.Unlock()
 	}()
-	fmt.Println("SSE " + chanId.String() + " opened")
-
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	flusher, ok := w.(http.Flusher)
@@ -51,23 +45,9 @@ func (s *Server) HandlerFunc(w http.ResponseWriter, r *http.Request) {
 			fmt.Println("SSE " + chanId.String() + " closed")
 			return
 		case m := <-c:
-			if m.Id != 0 {
-				if _, err := w.Write([]byte(fmt.Sprintf("id: %d\n", m.Id))); err != nil {
-					log.Println("Unable to write")
-					return
-				}
-			}
-			if m.Event != "" {
-				if _, err := w.Write([]byte(fmt.Sprintf("event: %s\n", m.Event))); err != nil {
-					log.Println("Unable to write")
-					return
-				}
-			}
-			if len(m.Data) != 0 {
-				if _, err := w.Write([]byte(fmt.Sprintf("data: %s\n", m.Data))); err != nil {
-					log.Println("Unable to write")
-					return
-				}
+			if err := m.writeTo(w); err != nil {
+				log.Println("Unable to write")
+				return
 			}
 			if _, err := w.Write([]byte("\n")); err != nil {
 				log.Println("Unable to write")
@@ -79,9 +59,15 @@ func (s *Server) HandlerFunc(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) Write(m Message) {
+func (s *Server) Send(id int, event string, data []byte) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	m := message{
+		id:    id,
+		event: event,
+		data:  data,
+	}
 
 	for _, c := range s.chans {
 		c <- m
